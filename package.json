@@ -1,0 +1,21 @@
+{
+  "name": "backfill-data",
+  "version": "1.0.0",
+  "main": "import-orders.js",
+  "scripts": {
+    "test": "node --test import-orders.test.js shopify-auth.test.js rate-limit.test.js shipstation-cache.test.js import-runner.test.js webhook-server.test.js live-sync.test.js",
+    "start": "node webhook-server.js",
+    "import": "node import-orders.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "json-bigint": "^1.0.0",
+    "mongodb": "^7.7.0"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  }
+}
