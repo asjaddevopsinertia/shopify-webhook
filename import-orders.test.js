@@ -417,3 +417,69 @@ test('OAuth requires a complete pair when no single-brand token is supplied', ()
     { 'X-FAIRE-OAUTH-ACCESS-TOKEN': 'oauth', 'X-FAIRE-APP-CREDENTIALS': 'app' });
   assert.deepEqual(faireHeaders({}), {});
 });
+
+const createManualShipping = require('./manual-shipping');
+const { parseComment } = createManualShipping;
+test('manual whole-order shipping applies to mixed orders without guessing a split or adding labels', () => {
+  const parsed = parseComment({ id: 'comment1', rawMessage: 'We paid $51.36 for shipping' }, order, 'USD');
+  assert.equal(parsed.record.scope, 'order_total');
+  const result = helpers().summarize(order, [
+    { source: 'shopify', id: 'label1', cost: 12, category: 'marmalade', tracking_number: 'JAM1234567' }, parsed.record
+  ], ['Faire lookup failed']);
+  assert.equal(result.total, 51.36);
+  assert.equal(result.unallocated, 51.36);
+  assert.equal(result.fruit, 0);
+  assert.equal(result.marmalade, 0);
+  assert.equal(result.excluded_shipments.length, 1);
+  assert.deepEqual(result.lookup_warnings, ['Faire lookup failed']);
+});
+test('manual shipping ignores estimates, negation, questions and retailer payments', () => {
+  for (const text of ['Customer paid $10 for shipping', 'We have not paid $10 for shipping',
+    'We paid $10 for shipping?', 'We paid $10 for shipping but it was refunded', 'We will pay $10 for shipping']) {
+    assert.equal(parseComment({ id: '1', rawMessage: text }, order, 'USD'), null);
+  }
+  assert.ok(parseComment({ id: '1', rawMessage: 'We paid $10 for shipping and $5 for insurance' }, order, 'USD').warning);
+  assert.ok(parseComment({ id: '1', rawMessage: 'We paid $10 for shipping CAD' }, order, 'USD').warning);
+});
+test('manual parcel comments deduplicate matching labels and flag conflicting amounts', () => {
+  const comment = parseComment({ id: 'c1', rawMessage: 'We paid $12 for marmalade shipping tracking: JAM1234567' }, order, 'USD').record;
+  const records = [{ source: 'shopify', id: 's1', tracking_number: 'JAM1234567', cost: 12, category: 'marmalade' },
+    { source: 'shipstation', id: 's2', tracking_number: 'FRUIT12345', cost: 8, category: 'fruit' }, comment];
+  assert.equal(helpers().summarize(order, records).total, 20);
+  assert.equal(helpers().summarize(order, [...records.slice(0, 2), { ...comment, cost: 14 }]).total, null);
+});
+test('multiple manual totals stay pending instead of adding or guessing', () => {
+  const records = [10, 20].map((cost, i) => parseComment({ id: String(i), rawMessage: `We paid $${cost} for shipping` }, order, 'USD').record);
+  assert.equal(helpers().summarize(order, records).total, null);
+  assert.equal(helpers().summarize({ ...order, line_items: [fruit] }, [records[0]]).fruit, 10);
+});
+test('comment API follows pages, deduplicates IDs and uses raw staff comment text', async () => {
+  let calls = 0;
+  const comment = { __typename: 'CommentEvent', id: 'c1', rawMessage: 'We paid $25.50 for shipping' };
+  const lookup = createManualShipping({ config: { currency: 'USD' }, api: p => p,
+    request: async (url, service, body) => {
+      assert.equal(url, 'graphql.json');
+      assert.equal(service, 'shopify');
+      assert.equal(body.variables.id, 'gid://shopify/Order/123');
+      assert.equal(body.variables.after, calls ? 'cursor1' : null);
+      calls++;
+      return { data: { data: { order: { events: { nodes: [comment, { __typename: 'BasicEvent', id: 'b1' }],
+        pageInfo: { hasNextPage: calls === 1, endCursor: 'cursor1' } } } } } };
+    } });
+  const result = await lookup(order);
+  assert.equal(calls, 2);
+  assert.equal(result.shipments.length, 1);
+  assert.equal(result.shipments[0].cost, 25.5);
+});
+test('comment query failures are surfaced rather than treated as no comments', async () => {
+  const lookup = createManualShipping({ config: { currency: 'USD' }, api: p => p,
+    request: async () => ({ data: { errors: [{ message: 'Access denied' }] } }) });
+  await assert.rejects(lookup(order), /shipping comments query failed/);
+});
+test('shipping lookup invokes comments and uses their complete order total', async t => {
+  env(t, { SHIPSTATION_API_KEY: undefined });
+  const h = createHelpers({ config: { currency: 'USD' }, api: p => p,
+    request: async () => ({ data: { events: [] } }),
+    comments: async () => ({ shipments: [parseComment({ id: 'c1', rawMessage: 'We paid $34 for shipping' }, order, 'USD').record], warnings: [] }) });
+  assert.equal((await h.shippingDetails(order)).total, 34);
+});

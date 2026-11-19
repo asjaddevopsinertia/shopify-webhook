@@ -110,3 +110,19 @@ Terminate public HTTPS at the proxy/platform. Use `HOST=0.0.0.0` instead when a 
 ## Verification performed
 
 `npm test` uses mocked Shopify/ShipStation/Faire requests, in-memory database operations and direct HTTP-handler calls. It does not start the server or contact production data. Tests cover raw-body authentication, queue failures, duplicate deliveries, new/partial/full fulfillment updates, refunds, shipping labels added on different days, refreshing positive totals, source failures, revision/lease races, missed-webhook recovery, and startup seeding. Deployment subscriptions, signing-secret correctness and real API field availability still need verification on the deployed service.
+
+## Manual shipping payments in Shopify timeline comments
+
+The live worker reads paginated Shopify GraphQL `CommentEvent` records alongside the existing shipping sources. Use an explicit USD payment statement:
+
+```text
+We paid $51.36 for shipping
+```
+
+Without a category or tracking number, this is the complete order shipping total. It replaces the source-calculated total; Shopify, ShipStation and Faire costs are not added again. On mixed fruit/marmalade orders the amount is stored in `real_shipping_cost` and `real_shipping_cost_details.unallocated`, without guessing a product split. Single-category orders allocate it to that category. The comment ID, text and method are retained for audit.
+
+For a payment covering just one parcel, include its tracking number, for example `We paid $12.50 for shipping tracking: 1Z1234567890123456`. Matching tracking numbers are deduplicated. Conflicting costs remain pending. Category-specific comments can say `We paid $12.50 for marmalade shipping`; tracking is needed when other shipping records exist.
+
+Keep only one whole-order payment comment: edit the existing comment instead of appending a replacement. Multiple whole-order totals remain pending. Estimates, customer payments, refund statements and ambiguous amounts are not accepted as final shipping costs. Removing a comment does not automatically erase a previously saved positive cost, following the worker's existing preservation behavior.
+
+Comments are checked on the next queued order sync or scheduled refresh; do not rely on a comment alone delivering an immediate order webhook. Existing defaults retry pending orders every five minutes and refresh resolved orders every six hours. Deploy `manual-shipping.js`, `shipping-costs.js` and `import-orders.js` together and restart the webhook service. No additional environment variables are needed. The historical importer still preserves existing positive costs.

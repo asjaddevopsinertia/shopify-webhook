@@ -78,7 +78,7 @@ function faireHeaders(env = process.env) {
 
 // Per-service queues remain safe with multiple concurrent order workers.
 const limiter = require('./rate-limit').createRateLimiter({ intervals: { shopify: 550, shipstation: 1600, faire: 1600 } });
-async function request(url, service) {
+async function request(url, service, graphqlBody) {
   const u = new URL(url);
   if (u.protocol !== 'https:' || u.hostname !== ({ shopify: config.shop, shipstation: 'ssapi.shipstation.com', faire: 'www.faire.com' })[service]) throw Error('Unexpected API URL');
   let renewedAfter401 = false;
@@ -91,7 +91,9 @@ async function request(url, service) {
     let res;
     try {
       res = await limiter.run(service, async () => {
-        const response = await fetch(u, { headers, signal: AbortSignal.timeout(20000), redirect: 'error' });
+        const response = await fetch(u, { headers: graphqlBody ? { ...headers, 'Content-Type': 'application/json' } : headers,
+          ...(graphqlBody ? { method: 'POST', body: JSON.stringify(graphqlBody) } : {}),
+          signal: AbortSignal.timeout(20000), redirect: 'error' });
         limiter.feedback(service, response, attempt);
         return response;
       });
@@ -140,7 +142,8 @@ async function connect() {
   return { client, db, orders, jobs };
 }
 
-const { shippingDetails, shippingCost, isFaire, isMixedOrder, getFaireOrder, faireFees } = require('./shipping-costs')({ request, api, config });
+const comments = require('./manual-shipping')({ request, api, config });
+const { shippingDetails, shippingCost, isFaire, isMixedOrder, getFaireOrder, faireFees } = require('./shipping-costs')({ request, api, config, comments });
 
 async function saveOrder(orders, order, cost, details, { preserveShipping = false } = {}) {
   const id = String(order.id);

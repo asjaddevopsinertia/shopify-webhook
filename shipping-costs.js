@@ -1,7 +1,7 @@
 'use strict';
 
 // Keep a numeric total for existing reports and a uniform audit trail for every order.
-module.exports = function createShippingHelpers({ request, api, config }) {
+module.exports = function createShippingHelpers({ request, api, config, comments }) {
   const round = n => Math.round(n * 100) / 100;
   const tracking = value => String(value || '').replace(/[^a-z0-9]/gi, '').toUpperCase();
   function amount(value) {
@@ -231,6 +231,30 @@ module.exports = function createShippingHelpers({ request, api, config }) {
     });
   }
   function summarize(order, records, warnings = []) {
+    const manualTotals = [...new Map(records.filter(s => s.source === 'shopify_comment' && s.scope === 'order_total').map(s => [s.id, s])).values()];
+    if (manualTotals.length) {
+      const manualWarnings = warnings.filter(w => /manual shipping|shipping comments/i.test(w));
+      if (manualTotals.length > 1) manualWarnings.push('Multiple manual order shipping totals: edit or delete the old comment so only one total remains');
+      const record = { ...manualTotals[0], category: groupFor(order.line_items) };
+      const total = manualWarnings.length ? null : record.cost;
+      return { total, currency: config.currency, fruit: 0, marmalade: 0, unallocated: 0,
+        [record.category]: record.cost, observed_total: record.cost,
+        status: total === null ? 'pending' : 'observed', method: 'manual_shipping_comment',
+        shipments: manualTotals.map(s => ({ ...s, category: groupFor(order.line_items) })),
+        excluded_shipments: records.filter(s => !manualTotals.includes(s)),
+        warnings: manualWarnings, lookup_warnings: warnings, checked_at: new Date() };
+    }
+    for (const record of records.filter(s => s.source === 'shopify_comment')) {
+      record.category = record.category || groupForTracking(order, record.tracking_number);
+      if (records.some(s => s !== record &&
+          (!record.tracking_number || !(s.tracking_number || s.tracking_numbers?.length)))) {
+        warnings.push('Manual shipping comments need tracking numbers when other shipping records exist to avoid double counting');
+      }
+      const sameParcel = records.find(s => s !== record && record.tracking_number && s.tracking_number === record.tracking_number && s.cost !== null);
+      if (sameParcel && round(sameParcel.cost) !== round(record.cost)) {
+        warnings.push(`Manual shipping comment ${record.id}: cost conflicts with another record for the same tracking number`);
+      }
+    }
     const aggregate = records.find(s => s.method === 'faire_payout_residual');
     if (aggregate) {
       const covered = new Set(aggregate.tracking_numbers);
@@ -289,7 +313,7 @@ module.exports = function createShippingHelpers({ request, api, config }) {
     const results = await Promise.allSettled([o => shipstation(o, options.shipstationShipments), events, o => {
       if (options.faireError) throw options.faireError;
       return faire(o, options.faireOrder);
-    }].map(lookup => Promise.resolve().then(() => lookup(order))));
+    }, ...(comments ? [comments] : [])].map(lookup => Promise.resolve().then(() => lookup(order))));
     for (const result of results) {
       if (result.status === 'fulfilled') {
         if (Array.isArray(result.value)) records.push(...result.value);
