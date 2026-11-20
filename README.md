@@ -26,7 +26,7 @@ Keep `SHOPIFY_WEBHOOK_SECRET` set to the signing secret of the app that sends th
 
 ## Shipping sources and schema
 
-Every eligible order is checked for ShipStation labels and Shopify label purchase events. Faire-tagged orders are also checked in Faire. Product names containing `marmalade` (including plural) or `fruit spread` (including plural) are marmalade; other names are fruit. Optional comma-separated `FRUIT_SKUS` and `MARMALADE_SKUS` override name classification.
+Every eligible order is checked for ShipStation labels and Shopify label purchase events. Faire-tagged orders are also checked in Faire. Product names containing `marmalade`, `fruit spread`, or `gift set` (including plurals, case-insensitive) are marmalade; all other names are fruit. Classification uses product names, not SKU overrides or product types.
 
 `real_shipping_cost` remains a numeric total (or null when unresolved), for compatibility with reports. Every newly checked order, including single-product orders, gets `real_shipping_cost_details` with the same fields:
 
@@ -119,3 +119,5 @@ Each recognized Faire order gets a `faire_fees` object from `payout_costs`. Both
 ## Live webhook service
 
 See [DEPLOYMENT.md](DEPLOYMENT.md) for required subscriptions, environment, recovery and startup. `npm start` runs the service; `npm test` only runs offline tests and does not open a server or access the live database. Live order updates preserve MongoDB enrichment fields, mirror partial/full fulfillment and refunds, and recalculate all applicable shipping sources even when the previous cost was positive. Periodic rechecks include labels created on a different day without waiting for another Shopify webhook.
+
+Fully fulfilled mixed orders with a single deduplicated shipping cost share that total equally between fruit and marmalade, with an odd cent assigned to marmalade. This also applies to whole-order manual shipping comments. Partial fulfillment, lookup failures, or explicitly unknown extra parcel costs do not trigger this fallback. Separate known category costs keep their actual allocations.

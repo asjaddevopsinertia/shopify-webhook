@@ -28,7 +28,7 @@ function env(t, values) {
 }
 test('classification uses the supplied product-name rules', () => {
   const h = helpers();
-  for (const title of ['Orange marmalades', 'Orange marmalade', 'Peach fruit spread', 'FRUIT SPREADS']) {
+  for (const title of ['Orange marmalades', 'Orange marmalade', 'Peach fruit spread', 'FRUIT SPREADS', '"Party Of Six" Gift Set', 'Holiday GIFT SETS']) {
     assert.equal(h.category({ title }), 'marmalade');
   }
   assert.equal(h.category(fruit), 'fruit');
@@ -482,4 +482,54 @@ test('shipping lookup invokes comments and uses their complete order total', asy
     request: async () => ({ data: { events: [] } }),
     comments: async () => ({ shipments: [parseComment({ id: 'c1', rawMessage: 'We paid $34 for shipping' }, order, 'USD').record], warnings: [] }) });
   assert.equal((await h.shippingDetails(order)).total, 34);
+});
+
+test('109863 fulfilled gift set and fruit spread resolve as marmalade-only shipping', async t => {
+  env(t, { SHIPSTATION_API_KEY: undefined, FRUIT_SKUS: 'GIFT' });
+  const items = [{ title: '"Party Of Six" Gift Set', sku: 'GIFT', quantity: 1 },
+    { title: 'Ruby Valencia & Apricot Fruit Spread', quantity: 1 }];
+  const h = helpers(async () => ({ data: { events: [{ id: '1', message: 'Purchased a $16.54 shipping label' }] } }));
+  const sample = { id: '19016231878709', name: '#109863', line_items: items,
+    fulfillments: [{ status: 'success', line_items: items }] };
+  assert.equal(h.isMixedOrder(sample), false);
+  const details = await h.shippingDetails(sample);
+  assert.equal(details.total, 16.54);
+  assert.equal(details.marmalade, 16.54);
+  assert.equal(details.fruit, 0);
+  assert.deepEqual(details.warnings, []);
+  assert.equal(h.category({ title: 'Fresh peaches', product_type: 'Gift Set' }), 'fruit');
+});
+
+test('fully fulfilled mixed orders split one shipping cost equally after parcel deduplication', () => {
+  const h = helpers();
+  const fully = { ...order, fulfillment_status: 'fulfilled' };
+  const label = { source: 'shopify', id: 'one', cost: 16.55, category: 'marmalade', tracking_number: 'JAM1234567' };
+  const details = h.summarize(fully, [label, { ...label, source: 'shipstation', id: 'mirror' }]);
+  assert.equal(details.total, 16.55);
+  assert.equal(details.fruit, 8.27);
+  assert.equal(details.marmalade, 8.28);
+  assert.equal(details.unallocated, 0);
+  assert.equal(details.allocation_basis, 'fulfilled_mixed_single_cost_equal_split');
+  assert.deepEqual(details.warnings, []);
+  assert.equal(details.shipments.length, 1);
+  assert.equal(h.summarize({ ...fully, fulfillment_status: 'partial' }, [label]).total, null);
+  assert.equal(h.summarize(fully, [label], ['ShipStation request failed']).total, null);
+  assert.equal(h.summarize(fully, [label, { source: 'faire', id: 'unknown', cost: null, category: 'fruit', tracking_number: 'FRUIT12345' }]).total, null);
+});
+test('shared-cost rule covers whole-order comments and preserves separately priced categories', () => {
+  const h = helpers();
+  const fully = { ...order, fulfillment_status: 'fulfilled' };
+  const comment = parseComment({ id: 'comment', rawMessage: 'We paid $30 for shipping' }, fully, 'USD').record;
+  const manual = h.summarize(fully, [comment]);
+  assert.equal(manual.total, 30);
+  assert.equal(manual.fruit, 15);
+  assert.equal(manual.marmalade, 15);
+  const separate = h.summarize(fully, [
+    { source: 'shopify', id: 'jam', tracking_number: 'JAM1234567', cost: 10, category: 'marmalade' },
+    { source: 'shipstation', id: 'fruit', tracking_number: 'FRUIT12345', cost: 20, category: 'fruit' }
+  ]);
+  assert.equal(separate.total, 30);
+  assert.equal(separate.fruit, 20);
+  assert.equal(separate.marmalade, 10);
+  assert.equal(separate.allocation_basis, undefined);
 });

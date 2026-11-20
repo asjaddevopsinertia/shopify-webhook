@@ -10,13 +10,9 @@ module.exports = function createShippingHelpers({ request, api, config, comments
     return Number.isFinite(n) && n >= 0 ? n : null;
   }
   function category(item) {
-    const sku = String(item.sku || '').toLowerCase();
-    for (const group of ['marmalade', 'fruit']) {
-      const skus = (process.env[`${group.toUpperCase()}_SKUS`] || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-      if (skus.includes(sku)) return group;
-    }
-    const text = `${item.title || item.name || ''} ${item.product_type || ''}`;
-    if (/marmal(?:ade|de)s?|fruit\s+spreads?/i.test(text)) return 'marmalade';
+    // The merchant's product-name rule applies consistently to order and parcel items.
+    const text = String(item.title || item.name || '');
+    if (/marmal(?:ade|de)s?|fruit\s+spreads?|gift\s+sets?/i.test(text)) return 'marmalade';
     return 'fruit';
   }
   function groupFor(items) {
@@ -231,14 +227,22 @@ module.exports = function createShippingHelpers({ request, api, config, comments
     });
   }
   function summarize(order, records, warnings = []) {
+    const splitSharedCost = cost => {
+      const cents = Math.round(cost * 100);
+      // Preserve the exact total when an odd cent cannot be divided evenly.
+      return { fruit: Math.floor(cents / 2) / 100, marmalade: Math.ceil(cents / 2) / 100,
+        unallocated: 0, allocation_basis: 'fulfilled_mixed_single_cost_equal_split' };
+    };
     const manualTotals = [...new Map(records.filter(s => s.source === 'shopify_comment' && s.scope === 'order_total').map(s => [s.id, s])).values()];
     if (manualTotals.length) {
       const manualWarnings = warnings.filter(w => /manual shipping|shipping comments/i.test(w));
       if (manualTotals.length > 1) manualWarnings.push('Multiple manual order shipping totals: edit or delete the old comment so only one total remains');
       const record = { ...manualTotals[0], category: groupFor(order.line_items) };
       const total = manualWarnings.length ? null : record.cost;
+      const shared = total !== null && order.fulfillment_status === 'fulfilled' && isMixedOrder(order);
       return { total, currency: config.currency, fruit: 0, marmalade: 0, unallocated: 0,
         [record.category]: record.cost, observed_total: record.cost,
+        ...(shared ? splitSharedCost(record.cost) : {}),
         status: total === null ? 'pending' : 'observed', method: 'manual_shipping_comment',
         shipments: manualTotals.map(s => ({ ...s, category: groupFor(order.line_items) })),
         excluded_shipments: records.filter(s => !manualTotals.includes(s)),
@@ -288,9 +292,13 @@ module.exports = function createShippingHelpers({ request, api, config, comments
     const knownTracking = new Set(shipments.flatMap(s => [s.tracking_number, ...(s.tracking_numbers || [])]).filter(Boolean));
     const expectedTracking = (order.fulfillments || []).filter(f => f.status !== 'cancelled')
       .flatMap(f => [f.tracking_number, ...(f.tracking_numbers || [])]).map(tracking).filter(Boolean);
-    if (expectedTracking.some(t => !knownTracking.has(t)) && shipments.every(hasTracking)) warnings.push('Some fulfilled parcels have no label cost');
+    // Merchant rule: one known charge on a fully fulfilled mixed order covers both
+    // categories. Do not apply when extra parcels have explicitly unknown costs.
+    const shared = order.fulfillment_status === 'fulfilled' && isMixedOrder(order) &&
+      shipments.length === 1 && shipments[0].cost !== null && !warnings.length;
+    if (!shared && expectedTracking.some(t => !knownTracking.has(t)) && shipments.every(hasTracking)) warnings.push('Some fulfilled parcels have no label cost');
     const expectedGroups = new Set((order.line_items || []).filter(i => Number(i.quantity ?? 1) > 0).map(category));
-    if (expectedGroups.size > 1 && (shipments.some(s => s.category === 'unallocated') ||
+    if (!shared && expectedGroups.size > 1 && (shipments.some(s => s.category === 'unallocated') ||
         [...expectedGroups].some(group => !shipments.some(s => s.category === group)))) {
       warnings.push('Mixed fruit/marmalade order needs identifiable costs for both product groups');
     }
@@ -303,6 +311,7 @@ module.exports = function createShippingHelpers({ request, api, config, comments
     const observed = round(priced.reduce((n, s) => n + s.cost, 0));
     const total = priced.length && !warnings.length ? observed : null;
     return { total, currency: config.currency, ...totals, observed_total: priced.length ? observed : null,
+      ...(shared ? splitSharedCost(observed) : {}),
       status: total === null ? 'pending' : shipments.some(s => s.cost_status === 'inferred') ? 'inferred' : 'observed',
       shipments, warnings: [...new Set(warnings)], checked_at: new Date() };
   }
